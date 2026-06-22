@@ -97,6 +97,8 @@ Cuando termine, busca **"Claude Terminal"** en tu Escritorio y haz doble clic. â
 
 ## ğŸ§ Linux
 
+<p align="center"><img src="assets/banner-linux.png" alt="Instalar Claude Code en Linux" width="760"></p>
+
 ### Un solo comando (recomendado)
 
 Abre tu **terminal**, pega esto y pulsa **Enter**:
