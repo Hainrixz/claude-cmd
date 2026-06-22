@@ -1,8 +1,16 @@
+<p align="center">
+  <img src="assets/hero.png" alt="claude-cmd — Instala Claude Code en 1 clic" width="840">
+</p>
+
 # Claude Code en 1 clic 🚀
 
 Instala **Claude Code** correctamente y deja un ícono **"Claude Terminal"** en tu Escritorio.
 Sin saber programar. Hecho para evitar los errores típicos de instalación (el clásico
 `claude: command not found`, problemas de PATH, permisos, etc.).
+
+<p align="center">
+  <a href="https://github.com/Hainrixz/claude-cmd/releases/latest"><b>📥 Descarga directa — última versión</b></a>
+</p>
 
 ---
 
@@ -15,6 +23,8 @@ Sin saber programar. Hecho para evitar los errores típicos de instalación (el 
 ---
 
 ## 🍎 Mac
+
+<p align="center"><img src="assets/banner-mac.png" alt="Instalar Claude Code en Mac" width="760"></p>
 
 ### Opción A — Descargar el archivo (recomendado)
 
@@ -42,6 +52,8 @@ Cuando termine, busca **"Claude Terminal"** en tu Escritorio y haz doble clic. �
 ---
 
 ## 🪟 Windows
+
+<p align="center"><img src="assets/banner-windows.png" alt="Instalar Claude Code en Windows" width="760"></p>
 
 ### Opción A — Descargar el archivo (recomendado)
 
