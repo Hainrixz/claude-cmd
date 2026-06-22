@@ -251,14 +251,119 @@ if [ ! -d "$DESKTOP_DIR" ]; then
   aviso "No encontré la carpeta Escritorio (~/Desktop). Omito el ícono."
 else
   CLAUDE_ABS="$(command -v claude || echo "$CLAUDE_BIN")"
-  cat > "$LAUNCHER" <<EOF
+  # El cuerpo del lanzador (incluido el menú) se escribe en un heredoc ENTRE
+  # COMILLAS (<<'MENU'), así el bash queda literal y no hay que escapar cada $.
+  # Solo la línea de lanzamiento (con la ruta absoluta del binario) va en un
+  # heredoc normal al final, donde sí se expanden $CLAUDE_ABS y $SKIP_FLAG.
+  cat > "$LAUNCHER" <<'MENU'
 #!/bin/bash
 # Claude Terminal — Lanzador de Claude Code (generado por claude-cmd).
-# Doble clic para abrir Claude.
-export PATH="\$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:\$PATH"
+# Doble clic para abrir Claude. Pregunta en qué carpeta abrirlo.
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 clear 2>/dev/null || true
-echo "Abriendo Claude... (para salir escribe /exit o pulsa Ctrl+C)"
+
+# ---- Menú "elegir carpeta" ----
+STATE_DIR="$HOME/.local/state/claude-cmd"
+STATE_FILE="$STATE_DIR/lastdir"
+
+# Limpia una ruta pegada o arrastrada: quita comillas, des-escapa el "\ " que
+# Finder mete al arrastrar, y recorta espacios sobrantes al inicio/fin.
+_limpiar_ruta() {
+  local s="$1"
+  s="${s#\"}"; s="${s%\"}"
+  s="${s#\'}"; s="${s%\'}"
+  s="${s//\\ / }"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+# Memoria: última carpeta usada (si existe y sigue siendo una carpeta válida).
+ULTIMA=""
+if [ -f "$STATE_FILE" ]; then ULTIMA="$(cat "$STATE_FILE" 2>/dev/null)"; fi
+if [ -n "$ULTIMA" ] && [ ! -d "$ULTIMA" ]; then ULTIMA=""; fi
+
+DESTINO=""
+while :; do
+  echo "¿En qué carpeta quieres abrir Claude Code? 📂"
+  echo "Elige una opción (o pulsa Enter para usar la de siempre)."
+  echo
+  echo "  [Enter]  Tu carpeta personal  (por defecto)"
+  echo "       1   Escritorio"
+  echo "       2   Documentos"
+  echo "       3   Descargas"
+  echo "       4   Elegir una carpeta…  (se abre una ventana para buscarla)"
+  echo "       5   Escribir o arrastrar una carpeta aquí"
+  if [ -n "$ULTIMA" ]; then
+    echo "       6   Última carpeta que usaste:  $ULTIMA"
+  fi
+  echo
+  printf "Tu elección: "
+  read -r ELECCION
+
+  case "$ELECCION" in
+    "")  DESTINO="$HOME" ;;
+    1)   DESTINO="$HOME/Desktop" ;;
+    2)   DESTINO="$HOME/Documents" ;;
+    3)   DESTINO="$HOME/Downloads" ;;
+    4)
+      # Selector gráfico nativo de macOS.
+      elegida="$(osascript -e 'try' -e 'POSIX path of (choose folder with prompt "Elige la carpeta para abrir Claude Code")' -e 'end try' 2>/dev/null)"
+      elegida="$(_limpiar_ruta "$elegida")"
+      if [ -n "$elegida" ] && [ -d "$elegida" ]; then
+        DESTINO="$elegida"
+      else
+        echo; echo "  No se eligió ninguna carpeta. Volvamos al menú."; echo; continue
+      fi
+      ;;
+    5)
+      printf "  Escribe o arrastra la carpeta y pulsa Enter: "
+      read -r escrita
+      escrita="$(_limpiar_ruta "$escrita")"
+      case "$escrita" in
+        "~")   escrita="$HOME" ;;
+        "~/"*) escrita="$HOME/${escrita#\~/}" ;;
+      esac
+      if [ -n "$escrita" ] && [ -d "$escrita" ]; then
+        DESTINO="$escrita"
+      else
+        echo; echo "  No encontré esa carpeta. Volvamos al menú."; echo; continue
+      fi
+      ;;
+    6)
+      if [ -n "$ULTIMA" ] && [ -d "$ULTIMA" ]; then
+        DESTINO="$ULTIMA"
+      else
+        echo; echo "  Opción no válida. Volvamos al menú."; echo; continue
+      fi
+      ;;
+    *)   echo; echo "  Opción no válida. Volvamos al menú."; echo; continue ;;
+  esac
+  break
+done
+
+# Validación final: si el destino no sirve, caer a la carpeta personal.
+if [ -z "$DESTINO" ] || [ ! -d "$DESTINO" ]; then
+  echo "  No encontré esa carpeta. Abro tu carpeta personal."
+  DESTINO="$HOME"
+fi
+if ! cd "$DESTINO" 2>/dev/null; then
+  echo "  No encontré esa carpeta. Abro tu carpeta personal."
+  cd "$HOME" 2>/dev/null || cd /
+fi
+
+# Guardar la carpeta realmente usada como "última carpeta".
+mkdir -p "$STATE_DIR" 2>/dev/null && printf '%s\n' "$(pwd)" > "$STATE_FILE" 2>/dev/null
+
+clear 2>/dev/null || true
+echo "  ✔ Abriendo Claude Code en:  $(pwd)"
+echo "  (para salir escribe /exit o pulsa Ctrl+C)"
 echo
+echo "💡 ¿Primera vez? Pulsa Enter sin escribir nada y listo: usamos tu carpeta personal."
+echo
+# ---- /Menú ----
+MENU
+  cat >> "$LAUNCHER" <<EOF
 "$CLAUDE_ABS"$SKIP_FLAG "\$@"
 echo
 echo "Claude se cerró. Pulsa ENTER para cerrar esta ventana..."

@@ -188,19 +188,142 @@ if ($IconBase64) {
 }
 
 try {
+    # --- 1. Escribir el launcher .cmd persistente (muestra el menu de carpeta) ---
+    $cfgDir       = Join-Path $env:LOCALAPPDATA 'claude-cmd'
+    $LauncherPath = Join-Path $cfgDir 'claude-launcher.cmd'
+    New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
+
+    # Here-string LITERAL (@' ... '@): PowerShell NO interpreta % ! " ni $ aqui
+    # dentro, asi que el batch llega intacto. Los marcadores __CLAUDE_EXE__ y
+    # __SKIP_ARG__ se reemplazan despues por la ruta real y el flag.
+    $launcherTemplate = @'
+@echo off
+chcp 65001 >nul
+setlocal
+
+rem --- Rutas internas SIN acentos. Solo la carpeta destino del usuario
+rem --- puede tener acentos/espacios; siempre va entre comillas.
+set "CLAUDE_EXE=__CLAUDE_EXE__"
+set "SKIP_ARG=__SKIP_ARG__"
+set "CFG_DIR=%LOCALAPPDATA%\claude-cmd"
+set "LASTDIR_FILE=%CFG_DIR%\lastdir.txt"
+if not exist "%CFG_DIR%" mkdir "%CFG_DIR%" >nul 2>&1
+
+rem --- Leer la ultima carpeta guardada (si existe y sigue siendo valida) ---
+set "LASTDIR="
+if exist "%LASTDIR_FILE%" (
+  set /p LASTDIR=<"%LASTDIR_FILE%"
+)
+if defined LASTDIR if not exist "%LASTDIR%\" set "LASTDIR="
+
+:MENU
+cls
+echo.
+echo   ============================================
+echo      Claude Terminal - elegir carpeta
+echo   ============================================
+echo.
+echo     [Enter]  Carpeta personal   (%USERPROFILE%)
+echo       1      Escritorio
+echo       2      Documentos
+echo       3      Descargas
+echo       4      Elegir una carpeta (selector grafico)
+echo       5      Escribir / pegar una ruta
+if defined LASTDIR echo       6      Ultima usada: %LASTDIR%
+echo.
+set "CHOICE="
+set /p "CHOICE=  Tu opcion: "
+
+rem --- Por defecto (Enter vacio) = carpeta personal ---
+if not defined CHOICE (
+  set "TARGET=%USERPROFILE%"
+  goto GO
+)
+
+if "%CHOICE%"=="1" set "TARGET=%USERPROFILE%\Desktop"      & goto GO
+if "%CHOICE%"=="2" set "TARGET=%USERPROFILE%\Documents"    & goto GO
+if "%CHOICE%"=="3" set "TARGET=%USERPROFILE%\Downloads"    & goto GO
+if "%CHOICE%"=="4" goto PICK
+if "%CHOICE%"=="5" goto TYPED
+if "%CHOICE%"=="6" if defined LASTDIR set "TARGET=%LASTDIR%" & goto GO
+
+echo.
+echo   Opcion no valida. Intenta de nuevo.
+timeout /t 1 >nul
+goto MENU
+
+:PICK
+rem --- Selector grafico (FolderBrowserDialog) via PowerShell. Usa SOLO comillas
+rem     simples dentro para no chocar con las dobles de -Command "...". ---
+set "TARGET="
+for /f "usebackq delims=" %%I in (`powershell.exe -NoProfile -STA -Command "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = 'Elige la carpeta donde abrir Claude Code'; $d.ShowNewFolderButton = $true; if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($d.SelectedPath) }"`) do set "TARGET=%%I"
+if not defined TARGET (
+  echo.
+  echo   No se eligio ninguna carpeta. Vuelvo al menu.
+  timeout /t 1 >nul
+  goto MENU
+)
+goto GO
+
+:TYPED
+echo.
+set "TARGET="
+set /p "TARGET=  Pega o escribe la ruta completa: "
+rem Quitar comillas que el usuario pudiera pegar (p.ej. "C:\Mi Carpeta")
+if defined TARGET set "TARGET=%TARGET:"=%"
+if not defined TARGET goto MENU
+goto GO
+
+:GO
+rem --- Validacion final: la carpeta debe existir; si no, caer a la personal ---
+if not exist "%TARGET%\" (
+  echo.
+  echo   La carpeta no existe:  %TARGET%
+  echo   Uso tu carpeta personal en su lugar.
+  set "TARGET=%USERPROFILE%"
+  timeout /t 1 >nul
+)
+
+rem --- Guardar la ultima carpeta usada ---
+>"%LASTDIR_FILE%" echo %TARGET%
+
+rem --- Ir a la carpeta y lanzar Claude. La ventana NO se cierra porque este
+rem     .cmd corre dentro de  cmd /k  (lo abre el .lnk). %* reenvia argumentos.
+cd /d "%TARGET%"
+echo.
+echo   Abriendo Claude en:  %TARGET%
+echo.
+"%CLAUDE_EXE%"%SKIP_ARG% %*
+
+endlocal
+'@
+
+    # Reemplazar marcadores por los valores reales.
+    # $skipArg viene como ' --dangerously-skip-permissions' (con espacio) o ''.
+    $launcherText = $launcherTemplate.Replace('__CLAUDE_EXE__', $ClaudeExe).Replace('__SKIP_ARG__', $skipArg)
+
+    # UTF-8 SIN BOM (combina con 'chcp 65001' del .cmd para mostrar bien el menu).
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText($LauncherPath, $launcherText, $utf8NoBom)
+    if (Test-Path $LauncherPath) {
+        Write-Ok "Lanzador con menu de carpeta creado."
+    }
+
+    # --- 2. Re-apuntar el .lnk del Escritorio al launcher .cmd ---
     $desktop = [Environment]::GetFolderPath('Desktop')
     $lnkPath = Join-Path $desktop 'Claude Terminal.lnk'
 
     $wsh = New-Object -ComObject WScript.Shell
     $sc  = $wsh.CreateShortcut($lnkPath)
-    # cmd.exe /k "<ruta-abs-claude.exe>"  -> abre terminal nueva, ejecuta claude por ruta
-    # absoluta (funciona antes del refresco de PATH) y mantiene la ventana abierta.
+    # cmd.exe /k "<ruta-abs-launcher.cmd>" -> abre terminal, corre el menu y, tras
+    # lanzar Claude, deja la ventana abierta (gracias a /k). Una sola pareja de
+    # comillas porque apunta a UN solo archivo .cmd.
     $sc.TargetPath       = Join-Path $env:SystemRoot 'System32\cmd.exe'
-    $sc.Arguments        = "/k `"`"$ClaudeExe`"$skipArg`""
+    $sc.Arguments        = "/k `"$LauncherPath`""
     $sc.WorkingDirectory = $env:USERPROFILE
     $sc.IconLocation     = $iconRef
     $sc.WindowStyle      = 1
-    $sc.Description      = 'Abrir Claude Code'
+    $sc.Description      = 'Abrir Claude Code (elegir carpeta)'
     $sc.Save()
     [System.Runtime.InteropServices.Marshal]::ReleaseComObject($wsh) | Out-Null
 
@@ -210,7 +333,7 @@ try {
         Write-Aviso "No se pudo confirmar la creacion del icono."
     }
 } catch {
-    Write-Aviso "No se pudo crear el icono: $($_.Exception.Message)"
+    Write-Aviso "No se pudo crear el icono/lanzador: $($_.Exception.Message)"
     Write-Info  "Puedes abrir Claude escribiendo 'claude' en una terminal nueva."
 }
 

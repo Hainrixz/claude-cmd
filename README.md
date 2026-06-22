@@ -95,6 +95,27 @@ Cuando termine, busca **"Claude Terminal"** en tu Escritorio y haz doble clic. �
 
 ---
 
+## 📂 Elige la carpeta al abrir
+
+Cada vez que abres **"Claude Terminal"**, te pregunta en qué carpeta quieres trabajar:
+
+```
+  ¿En qué carpeta quieres abrir Claude Code? 📂
+
+   [Enter]  Tu carpeta personal  (por defecto)
+       1    Escritorio
+       2    Documentos
+       3    Descargas
+       4    Elegir una carpeta…  (se abre una ventana para buscarla)
+       5    Escribir o arrastrar una carpeta
+```
+
+Pulsa **Enter** para tu carpeta personal (lo de siempre), elige una carpeta común, abre un
+**explorador** para buscarla, o escribe/arrastra una ruta. Recuerda la **última carpeta** que
+usaste para ofrecértela la próxima vez. Funciona igual en Mac y Windows.
+
+---
+
 ## ▶️ La primera vez
 
 Al abrir Claude Code, se abrirá tu **navegador** para iniciar sesión. Inicia sesión con tu
