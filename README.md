@@ -26,28 +26,49 @@ Sin saber programar. Hecho para evitar los errores típicos de instalación (el 
 
 <p align="center"><img src="assets/banner-mac.png" alt="Instalar Claude Code en Mac" width="760"></p>
 
-### Opción A — Descargar el archivo (recomendado)
+### Método 1 — Recomendado (fácil y **sin avisos de seguridad**)
 
-1. Descarga **[`install-mac.command`](https://raw.githubusercontent.com/Hainrixz/claude-cmd/main/install-mac.command)**
-   (clic derecho → "Guardar enlace como…", o desde la página del repo).
-2. Haz **doble clic** en el archivo.
-3. Si macOS lo bloquea ("no se puede abrir porque es de un desarrollador no identificado"):
-   **clic derecho sobre el archivo → Abrir → Abrir**. (Solo la primera vez.)
+Esta es la forma más simple. No descarga ningún archivo, así que macOS **no muestra ninguna advertencia**.
 
-> Si el doble clic falla por permisos, abre **Terminal** y pega esto una vez:
-> ```bash
-> chmod +x ~/Downloads/install-mac.command && xattr -dr com.apple.quarantine ~/Downloads/install-mac.command && ~/Downloads/install-mac.command
-> ```
-
-### Opción B — Un solo comando (lo más confiable)
-
-Abre **Terminal** (⌘ + Espacio → escribe "Terminal" → Enter), pega esto y pulsa Enter:
+1. Abre la app **Terminal**: pulsa `⌘ + Espacio`, escribe `Terminal` y pulsa `Enter`.
+2. Copia y pega este comando, y pulsa `Enter`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Hainrixz/claude-cmd/main/install-mac.command | bash
 ```
 
-Cuando termine, busca **"Claude Terminal"** en tu Escritorio y haz doble clic. ✅
+3. Cuando termine, busca **"Claude Terminal"** en tu Escritorio y haz doble clic. ✅
+
+> 🔒 **¿Es seguro?** Sí. El instalador es de código abierto y puedes leerlo antes de
+> ejecutarlo aquí: **[`install-mac.command`](./install-mac.command)**. No instala nada oculto.
+
+---
+
+### Método 2 — Descargar el archivo (alternativa)
+
+Si prefieres descargar el instalador y hacer doble clic, ten en cuenta que macOS mostrará
+un **aviso de seguridad** la primera vez (*"macOS no puede comprobar si install-mac.command
+contiene software malicioso"*). Es normal en cualquier app gratuita que no paga la firma de
+Apple — **no es un virus**. Así lo saltas:
+
+1. Descarga **[`install-mac.command`](https://raw.githubusercontent.com/Hainrixz/claude-cmd/main/install-mac.command)**
+   y haz **doble clic**. Cuando aparezca el aviso, pulsa **Listo** (no "Mover a la papelera").
+2. Abre **Ajustes del Sistema → Privacidad y Seguridad**.
+3. Baja hasta la sección **Seguridad**: verás *"install-mac.command" se bloqueó…* con el
+   botón **Abrir de todos modos**. Púlsalo.
+4. Autentícate con **Touch ID** o tu **contraseña de administrador** y confirma **Abrir**. (Solo la primera vez.)
+
+> ⚠️ **El truco de "clic derecho → Abrir" ya NO funciona.** Apple lo eliminó en macOS 15
+> Sequoia (2024) y sigue eliminado en Tahoe (26). Usa los pasos de arriba.
+>
+> ⏱️ **macOS Tahoe (26):** pulsa *Abrir de todos modos* dentro de la **primera hora** tras
+> ver el aviso. Si pasó más tiempo, vuelve a hacer doble clic para que reaparezca.
+
+> **Atajo por Terminal:** si no quieres tocar Ajustes, quita la marca de cuarentena del
+> archivo descargado y el doble clic funcionará sin avisos:
+> ```bash
+> xattr -dr com.apple.quarantine ~/Downloads/install-mac.command
+> ```
 
 ---
 
@@ -97,8 +118,8 @@ cuenta de Anthropic y vuelve a la ventana de la terminal. ¡Listo!
 | Síntoma (lo que ves) | Por qué pasa | Solución |
 |---|---|---|
 | `command not found: claude` / `'claude' no se reconoce` | El PATH no se recargó | **Cierra y abre** una terminal nueva. Mac: o ejecuta `source ~/.zshrc`. (El ícono del Escritorio funciona igual.) |
-| (Mac) "no se puede abrir porque es de un desarrollador no identificado" | Gatekeeper en un archivo descargado | **Clic derecho → Abrir → Abrir.** El ícono del Escritorio no tiene este problema (se crea en tu Mac). |
-| (Mac) "no tiene privilegios de acceso" al doble clic | El archivo descargado perdió el permiso de ejecución | Usa la **Opción B** (el comando), o el comando `chmod +x …` de arriba. |
+| (Mac) "macOS no puede comprobar si install-mac.command contiene software malicioso" / "no se puede abrir" | Gatekeeper en un archivo descargado y sin firmar (normal en software gratuito) | **Mejor:** usa el **Método 1** (comando de Terminal), que no genera el aviso. **O bien:** Ajustes del Sistema → Privacidad y Seguridad → sección Seguridad → **Abrir de todos modos** (en Tahoe, dentro de 1 hora). **O por Terminal:** `xattr -dr com.apple.quarantine ~/Downloads/install-mac.command`. ⚠️ El viejo clic derecho → Abrir **ya no funciona** desde macOS Sequoia. El ícono del Escritorio no tiene este problema (se crea en tu Mac). |
+| (Mac) "no tiene privilegios de acceso" al doble clic | El archivo descargado perdió el permiso de ejecución | Usa el **Método 1** (el comando de Terminal), o ejecuta `chmod +x ~/Downloads/install-mac.command` y reintenta. |
 | (Windows) `irm no se reconoce` | Estás en CMD, no en PowerShell | Abre **PowerShell** (el prompt empieza con `PS C:\>`). |
 | (Windows) `bash no se reconoce` | Pegaste el comando de Mac en Windows | Usa el comando de Windows (`irm … | iex`). |
 | (Windows) "no se pueden ejecutar scripts / running scripts is disabled" | Política de ejecución restringida | `Set-ExecutionPolicy -Scope Process Bypass`, luego repite el comando. (El `.bat` ya lo evita.) |
