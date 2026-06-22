@@ -119,9 +119,25 @@ cuenta de Anthropic y vuelve a la ventana de la terminal. ¡Listo!
 Estos scripts usan el **instalador nativo oficial de Anthropic** por debajo
 (`https://claude.ai/install.sh` en Mac, `https://claude.ai/install.ps1` en Windows), que instala
 Claude Code por-usuario, sin Node ni permisos de administrador. Encima de eso:
-verifican la instalación, arreglan el PATH si hace falta, y **generan localmente** el ícono del
-Escritorio (por eso no sufre de Gatekeeper/SmartScreen). El ícono llama al binario por su **ruta
-absoluta**, así funciona de inmediato sin reiniciar la terminal.
+verifican la instalación, arreglan el PATH si hace falta, y **generan localmente** el lanzador del
+Escritorio (por eso no sufre de Gatekeeper/SmartScreen). El lanzador llama al binario por su **ruta
+absoluta**, así funciona de inmediato sin reiniciar la terminal. Además, al acceso directo se le pone
+el ícono de la **mascota** 🟧 (embebido en los instaladores como base64; en Mac vía `osascript`+
+NSWorkspace, en Windows como `.ico` en `%LOCALAPPDATA%\claude-cmd`). Si el ícono no se pudiera
+aplicar, el lanzador funciona igual.
+
+## 🎨 Personalizar / regenerar el ícono
+
+El ícono se genera desde `assets/mascot-source.png` con herramientas locales (Python + Pillow):
+
+```bash
+# 1) Genera claude-terminal.png (.icns no hace falta) y claude-terminal.ico + sus .b64
+python3 assets/make-icons.py assets/mascot-source.png assets --final A
+# 2) Inyecta los base64 en install-mac.command e install-windows.ps1
+python3 assets/embed-icons.py
+```
+
+`--final A` usa fondo transparente; `B` (verde) y `C` (oscuro de marca) también están disponibles.
 
 ## Licencia
 

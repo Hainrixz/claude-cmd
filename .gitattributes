@@ -5,3 +5,8 @@
 *.bat      text eol=crlf
 *.md       text
 LICENSE    text
+*.py       text eol=lf
+*.b64      text eol=lf
+# Binarios (sin normalización de fin de línea)
+*.png      binary
+*.ico      binary

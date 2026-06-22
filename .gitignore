@@ -1,0 +1,5 @@
+# Carpeta de trabajo/temporales para generar y revisar íconos (no se publica)
+build/
+*.pyc
+__pycache__/
+.venv/
