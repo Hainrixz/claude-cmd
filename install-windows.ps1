@@ -6,13 +6,14 @@
     - Ejecuta el instalador NATIVO oficial de Claude Code (irm install.ps1 | iex).
     - Asegura que %USERPROFILE%\.local\bin este en el PATH de usuario (solo si falta).
     - Verifica con 'claude --version' usando la ruta absoluta.
-    - Crea un icono "Claude Terminal" en el Escritorio que abre una terminal
-      nueva ejecutando el binario por su ruta absoluta (funciona de inmediato).
+    - Crea un icono "Claude Terminal" en el Escritorio que abre un CENTRO DE MANDO:
+      un panel persistente para lanzar Claude Code en varias carpetas (cada una en
+      su ventana), ver las sesiones activas y cerrarlas.
     - Es idempotente. Mensajes en espanol. No requiere administrador.
 .NOTES
     Repo: https://github.com/Hainrixz/claude-cmd
-    Modo avanzado (saltar permisos): se pregunta de forma interactiva, o se activa
-    con la variable de entorno CLAUDE_CMD_SKIP_PERMS=1.
+    Modo avanzado (--dangerously-skip-permissions): se elige POR SESION en el hub
+    ([N] normal / [A] avanzada); ya no se hornea un flag global.
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -141,28 +142,10 @@ if (-not $versionOK) {
 }
 
 # ---------------------------------------------------------------------------
-# 3b. Modo avanzado (saltar permisos): opcional
+# 3b. Modo avanzado (saltar permisos): ahora se elige POR SESION en el hub.
 # ---------------------------------------------------------------------------
-$skipArg = ''
-if ($env:CLAUDE_CMD_SKIP_PERMS -eq '1') {
-    $skipArg = ' --dangerously-skip-permissions'
-} else {
-    try {
-        Write-Host ""
-        Write-Info "Modo de apertura del icono:"
-        Write-Info "  Normal (seguro): Claude pide confirmacion antes de acciones sensibles."
-        Write-Info "  Avanzado: Claude actua sin pedir confirmacion (--dangerously-skip-permissions)."
-        $resp = Read-Host "   Activar modo avanzado? (s/N)"
-        if ($resp -match '^(s|si|sí|y|yes)$') {
-            $skipArg = ' --dangerously-skip-permissions'
-            Write-Aviso "Modo avanzado activado para el icono del Escritorio."
-        } else {
-            Write-Ok "Modo normal (seguro)."
-        }
-    } catch {
-        Write-Ok "Modo normal (seguro)."
-    }
-}
+# El Centro de Mando ofrece [N] sesion normal y [A] sesion avanzada
+# (--dangerously-skip-permissions); ya no se hornea un flag global aqui.
 
 # ---------------------------------------------------------------------------
 # 4. Icono del Escritorio "Claude Terminal" (.lnk con ruta absoluta)
@@ -188,125 +171,474 @@ if ($IconBase64) {
 }
 
 try {
-    # --- 1. Escribir el launcher .cmd persistente (muestra el menu de carpeta) ---
+    # --- 1. Escribir el Centro de Mando: launcher .cmd + hub.ps1 + session.ps1 ---
     $cfgDir       = Join-Path $env:LOCALAPPDATA 'claude-cmd'
     $LauncherPath = Join-Path $cfgDir 'claude-launcher.cmd'
     New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
 
-    # Here-string LITERAL (@' ... '@): PowerShell NO interpreta % ! " ni $ aqui
-    # dentro, asi que el batch llega intacto. Los marcadores __CLAUDE_EXE__ y
-    # __SKIP_ARG__ se reemplazan despues por la ruta real y el flag.
-    $launcherTemplate = @'
+    # Here-strings LITERALES (@' ... '@): PowerShell NO interpreta % ! " ni $ aqui
+    # dentro, asi que los .ps1/.cmd llegan intactos. El marcador __CLAUDE_EXE__ se
+    # reemplaza despues por la ruta real del binario.
+    # claude-launcher.cmd: conserva el NOMBRE para no romper el acceso directo (.lnk);
+    # solo arranca el Centro de Mando (hub en PowerShell) en esta misma ventana.
+    $launcherCmd = @'
 @echo off
 chcp 65001 >nul
-setlocal
+title Claude Terminal - Centro de Mando
+rem Este .cmd existe solo para no romper el acceso directo del Escritorio (.lnk).
+rem Abre el Centro de Mando (hub en PowerShell) en esta misma ventana.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0claude-hub.ps1"
+exit
+'@
+    # claude-hub.ps1: el Centro de Mando (panel persistente: lanza/observa/cierra).
+    $hubTemplate = @'
+# Claude Terminal - Centro de Mando (generado por claude-cmd).
+# Panel persistente: lanza, observa y cierra sesiones de Claude Code.
+$ErrorActionPreference = 'SilentlyContinue'
+$ClaudeExe  = '__CLAUDE_EXE__'
+$StateDir   = Join-Path $env:LOCALAPPDATA 'claude-cmd'
+$SessDir    = Join-Path $StateDir 'sessions'
+$LastDir    = Join-Path $StateDir 'lastdir.txt'
+$SessionPs1 = Join-Path $StateDir 'claude-session.ps1'
+$GraceClose = 10   # seg. que una sesion cerrada sigue visible antes de auto-borrarse
+$Utf8NoBom  = New-Object System.Text.UTF8Encoding($false)
+New-Item -ItemType Directory -Force -Path $SessDir | Out-Null
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 
-rem --- Rutas internas SIN acentos. Solo la carpeta destino del usuario
-rem --- puede tener acentos/espacios; siempre va entre comillas.
-set "CLAUDE_EXE=__CLAUDE_EXE__"
-set "SKIP_ARG=__SKIP_ARG__"
-set "CFG_DIR=%LOCALAPPDATA%\claude-cmd"
-set "LASTDIR_FILE=%CFG_DIR%\lastdir.txt"
-if not exist "%CFG_DIR%" mkdir "%CFG_DIR%" >nul 2>&1
+function Read-Session($file) {
+  $h = @{}
+  foreach ($line in (Get-Content -LiteralPath $file -ErrorAction SilentlyContinue)) {
+    if ($line -match '^(?<k>[^=]+)=(?<v>.*)$') { $h[$Matches.k] = $Matches.v }
+  }
+  return $h
+}
 
-rem --- Leer la ultima carpeta guardada (si existe y sigue siendo valida) ---
-set "LASTDIR="
-if exist "%LASTDIR_FILE%" (
-  set /p LASTDIR=<"%LASTDIR_FILE%"
-)
-if defined LASTDIR if not exist "%LASTDIR%\" set "LASTDIR="
+function Write-Session($file, $h) {
+  $tmp = "$file.tmp"
+  $lines = @(
+    "PID=$($h.PID)",
+    "FOLDER=$($h.FOLDER)",
+    "START=$($h.START)",
+    "STARTED_AT=$($h.STARTED_AT)",
+    "MODE=$($h.MODE)",
+    "STATUS=$($h.STATUS)",
+    "CLOSED_AT=$($h.CLOSED_AT)"
+  )
+  [System.IO.File]::WriteAllLines($tmp, [string[]]$lines, $Utf8NoBom)
+  Move-Item -LiteralPath $tmp -Destination $file -Force
+}
 
-:MENU
-cls
-echo.
-echo   ============================================
-echo      Claude Terminal - elegir carpeta
-echo   ============================================
-echo.
-echo     [Enter]  Carpeta personal   (%USERPROFILE%)
-echo       1      Escritorio
-echo       2      Documentos
-echo       3      Descargas
-echo       4      Elegir una carpeta (selector grafico)
-echo       5      Escribir / pegar una ruta
-if defined LASTDIR echo       6      Ultima usada: %LASTDIR%
-echo.
-set "CHOICE="
-set /p "CHOICE=  Tu opcion: "
+function Get-AliveSnapshot {
+  $snap = @{}
+  foreach ($p in (Get-Process)) { $snap[$p.Id] = $p.StartTime }
+  return $snap
+}
 
-rem --- Por defecto (Enter vacio) = carpeta personal ---
-if not defined CHOICE (
-  set "TARGET=%USERPROFILE%"
-  goto GO
-)
+# ---- Helpers de dibujo del panel (caja de 70 + sangria 2; area de contenido 66) ----
+function W($t, $c) { if ($null -ne $c) { Write-Host $t -ForegroundColor $c -NoNewline } else { Write-Host $t -NoNewline } }
+function Box-Top  { Write-Host ('  +' + ('=' * 68) + '+') }
+function Box-Div  { Write-Host ('  +' + ('-' * 68) + '+') }
+function Box-ISep { Write-Host ('  | ' + ('-' * 66) + ' |') }
 
-if "%CHOICE%"=="1" set "TARGET=%USERPROFILE%\Desktop"      & goto GO
-if "%CHOICE%"=="2" set "TARGET=%USERPROFILE%\Documents"    & goto GO
-if "%CHOICE%"=="3" set "TARGET=%USERPROFILE%\Downloads"    & goto GO
-if "%CHOICE%"=="4" goto PICK
-if "%CHOICE%"=="5" goto TYPED
-if "%CHOICE%"=="6" if defined LASTDIR set "TARGET=%LASTDIR%" & goto GO
+function Box-Left([string]$plain, $color = $null) {
+  $t = $plain
+  if ($t.Length -gt 66) { $t = $t.Substring(0, 65) + [char]0x2026 }
+  $t = $t.PadRight(66)
+  Write-Host '  | ' -NoNewline; W $t $color; Write-Host ' |'
+}
+function Box-Center([string]$plain, $color = $null) {
+  $t = $plain
+  if ($t.Length -gt 66) { $t = $t.Substring(0, 65) + [char]0x2026 }
+  $l = [int](( 66 - $t.Length ) / 2); $r = 66 - $t.Length - $l
+  Write-Host '  | ' -NoNewline; W ((' ' * $l) + $t + (' ' * $r)) $color; Write-Host ' |'
+}
+function Box-Title {
+  $mid = [char]0x00B7   # ·
+  $vis = 15 + 3 + 15    # 'CLAUDE TERMINAL' + ' · ' + 'CENTRO DE MANDO'
+  $l = [int]((66 - $vis) / 2); $r = 66 - $vis - $l
+  Write-Host '  | ' -NoNewline
+  Write-Host (' ' * $l) -NoNewline
+  Write-Host 'CLAUDE TERMINAL' -ForegroundColor Cyan -NoNewline
+  Write-Host " $mid " -NoNewline
+  Write-Host 'CENTRO DE MANDO' -ForegroundColor White -NoNewline
+  Write-Host (' ' * $r) -NoNewline
+  Write-Host ' |'
+}
+function Box-Status($act, $cls, $tot) {
+  $head = ' ESTADO DEL PANEL     '
+  $a = "Activas: $act"; $c = "Cerradas: $cls"; $t = "Total: $tot"
+  $used = $head.Length + $a.Length + 4 + $c.Length + 4 + $t.Length
+  $pad = 66 - $used; if ($pad -lt 0) { $pad = 0 }
+  Write-Host '  | ' -NoNewline
+  Write-Host $head -NoNewline
+  Write-Host $a -ForegroundColor Green -NoNewline
+  Write-Host '    ' -NoNewline
+  Write-Host $c -ForegroundColor Red -NoNewline
+  Write-Host '    ' -NoNewline
+  Write-Host $t -NoNewline
+  Write-Host (' ' * $pad) -NoNewline
+  Write-Host ' |'
+}
+function Box-TableHeader {
+  Write-Host '  | ' -NoNewline
+  $s = ('No.'.PadRight(3) + ' ' + 'ESTADO'.PadRight(11) + ' ' + 'MODO'.PadRight(8) + ' ' + 'CARPETA'.PadRight(33) + ' ' + 'PID'.PadRight(7))
+  Write-Host $s -ForegroundColor DarkGray -NoNewline
+  Write-Host ' |'
+}
+function Box-Row($s) {
+  $badgeColor = switch ($s.Badge) { '[ACTIVA]' { 'Green' } '[CERRADA]' { 'DarkGray' } default { 'Yellow' } }
+  $modoColor = if ($s.Mode -eq 'avanzada') { 'Magenta' } else { 'DarkGray' }
+  $f = $s.Folder
+  if ($f.Length -gt 33) { $f = $f.Substring(0, 32) + [char]0x2026 }
+  Write-Host '  | ' -NoNewline
+  Write-Host (([string]$s.Idx).PadRight(3)) -ForegroundColor DarkGray -NoNewline
+  Write-Host ' ' -NoNewline
+  Write-Host ($s.Badge.PadRight(11)) -ForegroundColor $badgeColor -NoNewline
+  Write-Host ' ' -NoNewline
+  Write-Host ($s.Mode.PadRight(8)) -ForegroundColor $modoColor -NoNewline
+  Write-Host ' ' -NoNewline
+  Write-Host ($f.PadRight(33)) -NoNewline
+  Write-Host ' ' -NoNewline
+  Write-Host ($s.PidDisp.PadRight(7)) -ForegroundColor DarkGray -NoNewline
+  Write-Host ' |'
+}
+function Box-Hotkeys([string]$plain) {
+  Write-Host '  | ' -NoNewline
+  $i = 0
+  while ($i -lt $plain.Length) {
+    if ($plain[$i] -eq '[' -and ($i + 2) -lt $plain.Length -and $plain[$i + 2] -eq ']') {
+      Write-Host '[' -ForegroundColor DarkGray -NoNewline
+      Write-Host $plain[$i + 1] -ForegroundColor Cyan -NoNewline
+      Write-Host ']' -ForegroundColor DarkGray -NoNewline
+      $i += 3
+    } else {
+      Write-Host $plain[$i] -NoNewline
+      $i += 1
+    }
+  }
+  $pad = 66 - $plain.Length; if ($pad -lt 0) { $pad = 0 }
+  Write-Host (' ' * $pad) -NoNewline
+  Write-Host ' |'
+}
+function Box-Mini([string]$sub) {
+  Clear-Host
+  Box-Top
+  Box-Title
+  Box-Center $sub DarkGray
+  Box-Top
+}
 
-echo.
-echo   Opcion no valida. Intenta de nuevo.
-timeout /t 1 >nul
-goto MENU
+function Scan-Sessions {
+  $script:Sessions = @()
+  $snap = Get-AliveSnapshot
+  $now = [DateTimeOffset]::Now.ToUnixTimeSeconds()
+  $script:SesAct = 0; $script:SesCls = 0
+  $i = 0
+  foreach ($f in (Get-ChildItem -LiteralPath $SessDir -Filter *.session -ErrorAction SilentlyContinue | Sort-Object Name)) {
+    $h = Read-Session $f.FullName
+    $procId = 0; [int]::TryParse([string]$h.PID, [ref]$procId) | Out-Null
+    $st = 0; [int64]::TryParse([string]$h.START, [ref]$st) | Out-Null
+    $age = $now - $st
+    $finished = $false
+    if ($procId -gt 0 -and $snap.ContainsKey($procId)) {
+      $badge = '[ACTIVA]'
+    } elseif ($h.STATUS -eq 'launching' -and $age -le 3) {
+      $badge = '[INICIANDO]'
+    } else {
+      $finished = $true
+      $badge = if ($h.STATUS -eq 'launching') { '[FALLO]' } else { '[CERRADA]' }
+    }
+    # Auto-borrado: una sesion terminada se sella con CLOSED_AT y, pasada la gracia, se elimina sola.
+    if ($finished) {
+      $ca = 0; [int64]::TryParse([string]$h.CLOSED_AT, [ref]$ca) | Out-Null
+      if ($ca -le 0) { $ca = $now; $h.CLOSED_AT = $now; Write-Session $f.FullName $h }
+      if (($now - $ca) -gt $GraceClose) {
+        Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+        continue
+      }
+      $script:SesCls++
+    } elseif ($badge -eq '[ACTIVA]') {
+      $script:SesAct++
+    }
+    $i++
+    $mode = if ($h.MODE -eq 'avanzada') { 'avanzada' } else { 'normal' }
+    $folder = [string]$h.FOLDER
+    if ($folder -and $folder.StartsWith($env:USERPROFILE)) { $folder = '~' + $folder.Substring($env:USERPROFILE.Length) }
+    $pidDisp = if ($procId -gt 0) { [string]$procId } else { '-' }
+    $script:Sessions += [pscustomobject]@{
+      Idx = $i; File = $f.FullName; ProcId = $procId; Started = $h.STARTED_AT
+      Badge = $badge; Mode = $mode; Folder = $folder; PidDisp = $pidDisp
+    }
+  }
+  $script:SesTot = $i
+}
 
-:PICK
-rem --- Selector grafico (FolderBrowserDialog) via PowerShell. Usa SOLO comillas
-rem     simples dentro para no chocar con las dobles de -Command "...". ---
-set "TARGET="
-for /f "usebackq delims=" %%I in (`powershell.exe -NoProfile -STA -Command "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = 'Elige la carpeta donde abrir Claude Code'; $d.ShowNewFolderButton = $true; if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($d.SelectedPath) }"`) do set "TARGET=%%I"
-if not defined TARGET (
-  echo.
-  echo   No se eligio ninguna carpeta. Vuelvo al menu.
-  timeout /t 1 >nul
-  goto MENU
-)
-goto GO
+function Show-Panel {
+  Scan-Sessions
+  Clear-Host
+  Box-Top
+  Box-Title
+  Box-Center 'panel de control de sesiones' DarkGray
+  Box-Div
+  Box-Status $script:SesAct $script:SesCls $script:SesTot
+  Box-Div
+  Box-Left ' SESIONES' White
+  Box-ISep
+  Box-TableHeader
+  Box-ISep
+  if ($script:SesTot -eq 0) {
+    Box-Left '  sin sesiones todavia - pulsa [N] para abrir la primera' DarkGray
+  } else {
+    foreach ($s in $script:Sessions) { Box-Row $s }
+  }
+  Box-Div
+  Box-Left ' ACCIONES' White
+  Box-ISep
+  Box-Hotkeys '  [N] Nueva sesion      [A] Nueva avanzada    [R] Refrescar'
+  Box-Hotkeys '  [C] Cerrar una        [X] Cerrar todas     [L] Limpiar cerradas'
+  Box-Hotkeys '  [S] Salir'
+  Box-Div
+  Box-Center 'Creado por @soy Enrique Rocha' DarkMagenta
+  Box-Top
+}
 
-:TYPED
-echo.
-set "TARGET="
-set /p "TARGET=  Pega o escribe la ruta completa: "
-rem Quitar comillas que el usuario pudiera pegar (p.ej. "C:\Mi Carpeta")
-if defined TARGET set "TARGET=%TARGET:"=%"
-if not defined TARGET goto MENU
-goto GO
+function Select-Folder {
+  $ultima = ''
+  if (Test-Path -LiteralPath $LastDir) { $ultima = ([string](Get-Content -LiteralPath $LastDir -TotalCount 1)).Trim() }
+  if ($ultima -and -not (Test-Path -LiteralPath $ultima)) { $ultima = '' }
+  while ($true) {
+    Box-Mini 'elegir carpeta para la nueva sesion'
+    Write-Host ''
+    Write-Host '    [Enter]  Tu carpeta personal'
+    Write-Host '       ' -NoNewline; Write-Host '1' -ForegroundColor Cyan -NoNewline; Write-Host '     Escritorio'
+    Write-Host '       ' -NoNewline; Write-Host '2' -ForegroundColor Cyan -NoNewline; Write-Host '     Documentos'
+    Write-Host '       ' -NoNewline; Write-Host '3' -ForegroundColor Cyan -NoNewline; Write-Host '     Descargas'
+    Write-Host '       ' -NoNewline; Write-Host '4' -ForegroundColor Cyan -NoNewline; Write-Host '     Elegir una carpeta (selector grafico)'
+    Write-Host '       ' -NoNewline; Write-Host '5' -ForegroundColor Cyan -NoNewline; Write-Host '     Escribir o pegar una ruta'
+    if ($ultima) { Write-Host '       ' -NoNewline; Write-Host '6' -ForegroundColor Cyan -NoNewline; Write-Host "     Ultima usada:  $ultima" }
+    Write-Host '       ' -NoNewline; Write-Host 'v' -ForegroundColor Cyan -NoNewline; Write-Host '     Volver al panel'
+    Write-Host ''
+    Write-Host '  Tu eleccion ' -NoNewline; Write-Host '>' -ForegroundColor Green -NoNewline; Write-Host ' ' -NoNewline
+    $sel = Read-Host
+    switch ($sel) {
+      ''  { return $env:USERPROFILE }
+      '1' { return (Join-Path $env:USERPROFILE 'Desktop') }
+      '2' { return (Join-Path $env:USERPROFILE 'Documents') }
+      '3' { return (Join-Path $env:USERPROFILE 'Downloads') }
+      '4' {
+        Add-Type -AssemblyName System.Windows.Forms
+        $d = New-Object System.Windows.Forms.FolderBrowserDialog
+        $d.Description = 'Elige la carpeta donde abrir Claude Code'
+        $d.ShowNewFolderButton = $true
+        if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK -and (Test-Path -LiteralPath $d.SelectedPath)) { return $d.SelectedPath }
+      }
+      '5' {
+        $t = ([string](Read-Host '  Pega o escribe la ruta completa')).Trim('"').Trim()
+        if ($t -and (Test-Path -LiteralPath $t)) { return $t } else { Write-Host '  No encontre esa carpeta.'; Start-Sleep 1 }
+      }
+      '6' { if ($ultima -and (Test-Path -LiteralPath $ultima)) { return $ultima } }
+      'v' { return $null }
+      'V' { return $null }
+    }
+  }
+}
 
-:GO
-rem --- Validacion final: la carpeta debe existir; si no, caer a la personal ---
-if not exist "%TARGET%\" (
-  echo.
-  echo   La carpeta no existe:  %TARGET%
-  echo   Uso tu carpeta personal en su lugar.
-  set "TARGET=%USERPROFILE%"
-  timeout /t 1 >nul
-)
+function New-ClaudeSession($folder, $mode) {
+  $sid = [guid]::NewGuid().ToString()
+  $sessFile = Join-Path $SessDir "$sid.session"
+  $now = [DateTimeOffset]::Now.ToUnixTimeSeconds()
+  Write-Session $sessFile @{ PID = ''; FOLDER = $folder; START = $now; STARTED_AT = ''; MODE = $mode; STATUS = 'launching' }
+  [System.IO.File]::WriteAllText($LastDir, $folder, $Utf8NoBom)
+  $argLine = '-NoProfile -ExecutionPolicy Bypass -File "{0}" "{1}"' -f $SessionPs1, $sid
+  try {
+    $wt = Get-Command wt.exe -ErrorAction SilentlyContinue
+    if ($wt) {
+      Start-Process 'wt.exe' -ArgumentList ('-w -1 powershell.exe ' + $argLine)
+    } else {
+      Start-Process 'powershell.exe' -ArgumentList $argLine
+    }
+    Write-Host ''
+    Write-Host '  Abriendo Claude en una ventana nueva - ' -NoNewline; Write-Host $folder -ForegroundColor Green
+    Start-Sleep 1
+  } catch {
+    Write-Host '  No pude abrir una ventana separada; abro Claude aqui.'
+    Start-Sleep 1
+    Remove-Item -LiteralPath $sessFile -Force -ErrorAction SilentlyContinue
+    Set-Location -LiteralPath $folder
+    if ($mode -eq 'avanzada') { & $ClaudeExe --dangerously-skip-permissions } else { & $ClaudeExe }
+  }
+}
 
-rem --- Guardar la ultima carpeta usada ---
->"%LASTDIR_FILE%" echo %TARGET%
+function Stop-ClaudeSession($sess) {
+  if ($sess.ProcId -le 0) { Write-Host '  Esa sesion aun se esta iniciando (sin PID).'; Start-Sleep 1; return }
+  $p = Get-Process -Id $sess.ProcId -ErrorAction SilentlyContinue
+  if (-not $p) { Write-Host '  Esa sesion ya no esta activa.'; Start-Sleep 1; return }
+  if ($sess.Started) {
+    if ($p.StartTime.ToString('o') -ne $sess.Started) {
+      Write-Host '  Ese proceso cambio (PID reciclado). No cierro nada.'; Start-Sleep 1; return
+    }
+  }
+  & taskkill /PID $sess.ProcId /T /F 2>$null | Out-Null
+  Write-Host '  Sesion cerrada.'; Start-Sleep 1
+}
 
-rem --- Ir a la carpeta y lanzar Claude. La ventana NO se cierra porque este
-rem     .cmd corre dentro de  cmd /k  (lo abre el .lnk). %* reenvia argumentos.
-cd /d "%TARGET%"
-echo.
-echo   Abriendo Claude en:  %TARGET%
-echo.
-"%CLAUDE_EXE%"%SKIP_ARG% %*
+function Close-One {
+  if ($script:SesTot -eq 0) { Write-Host '  No hay sesiones.'; Start-Sleep 1; return }
+  Write-Host '  No. a cerrar (Enter = cancelar) ' -NoNewline; Write-Host '>' -ForegroundColor Green -NoNewline; Write-Host ' ' -NoNewline
+  $num = Read-Host
+  if (-not $num) { return }
+  $n = 0
+  if (-not [int]::TryParse($num, [ref]$n)) { Write-Host '  Numero invalido.'; Start-Sleep 1; return }
+  $sess = $script:Sessions | Where-Object { $_.Idx -eq $n }
+  if (-not $sess) { Write-Host '  Numero invalido.'; Start-Sleep 1; return }
+  Stop-ClaudeSession $sess
+}
 
-endlocal
+function Close-All {
+  if ($script:SesTot -eq 0) { Write-Host '  No hay sesiones.'; Start-Sleep 1; return }
+  $c = Read-Host '  Cerrar TODAS las sesiones activas? (s/N)'
+  if ($c -notmatch '^[sS]') { return }
+  foreach ($sess in $script:Sessions) {
+    if ($sess.ProcId -gt 0) { & taskkill /PID $sess.ProcId /T /F 2>$null | Out-Null }
+  }
+  Write-Host '  Listo.'; Start-Sleep 1
+}
+
+# Borra de inmediato toda sesion terminada (protege solo la que recien arranca).
+function Remove-Finished {
+  $snap = Get-AliveSnapshot
+  $now = [DateTimeOffset]::Now.ToUnixTimeSeconds()
+  foreach ($f in (Get-ChildItem -LiteralPath $SessDir -Filter *.session -ErrorAction SilentlyContinue)) {
+    $h = Read-Session $f.FullName
+    $procId = 0; [int]::TryParse([string]$h.PID, [ref]$procId) | Out-Null
+    $st = 0; [int64]::TryParse([string]$h.START, [ref]$st) | Out-Null
+    $alive = ($procId -gt 0 -and $snap.ContainsKey($procId))
+    $fresh = ($h.STATUS -eq 'launching' -and ($now - $st) -le 3)
+    if (-not $alive -and -not $fresh) { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue }
+  }
+}
+
+function Clear-Closed { Remove-Finished; Write-Host '  Registro limpio.'; Start-Sleep 1 }
+function Invoke-Cleanup { Remove-Finished }
+
+function Exit-Hub {
+  $snap = Get-AliveSnapshot
+  $live = @()
+  foreach ($f in (Get-ChildItem -LiteralPath $SessDir -Filter *.session -ErrorAction SilentlyContinue)) {
+    $h = Read-Session $f.FullName
+    $procId = 0; [int]::TryParse([string]$h.PID, [ref]$procId) | Out-Null
+    if ($procId -gt 0 -and $snap.ContainsKey($procId)) { $live += $procId }
+  }
+  if ($live.Count -gt 0) {
+    $c = Read-Host "  Hay $($live.Count) sesion(es) activa(s). Cerrarlas al salir? (s/N)"
+    if ($c -match '^[sS]') {
+      foreach ($pn in $live) { & taskkill /PID $pn /T /F 2>$null | Out-Null }
+    } else {
+      Write-Host '  Las dejo abiertas (apareceran al volver a abrir el Centro de Mando).'
+      Start-Sleep 1
+    }
+  }
+  return $true
+}
+
+# ---- Bucle principal ----
+Invoke-Cleanup
+:mainloop while ($true) {
+  Show-Panel
+  Write-Host ''
+  Write-Host '  Accion ' -NoNewline; Write-Host '>' -ForegroundColor Green -NoNewline; Write-Host ' ' -NoNewline
+  $op = Read-Host
+  switch ([string]$op.ToUpper()) {
+    'N' { $f = Select-Folder; if ($f) { New-ClaudeSession $f 'normal' } }
+    'A' { $f = Select-Folder; if ($f) { New-ClaudeSession $f 'avanzada' } }
+    'R' { }
+    'C' { Close-One }
+    'X' { Close-All }
+    'L' { Clear-Closed }
+    'S' { if (Exit-Hub) { break mainloop } }
+    default { }
+  }
+}
+'@
+    # claude-session.ps1: runner por sesion (corre Claude en su ventana y captura su PID real).
+    $sessionTemplate = @'
+param([string]$Sid)
+# Claude Terminal - runner por sesion (generado por claude-cmd).
+# Corre en su PROPIA ventana: lee la carpeta del registro, arranca Claude,
+# captura su PID real (-PassThru), espera y marca la sesion como cerrada.
+$ErrorActionPreference = 'SilentlyContinue'
+$ClaudeExe = '__CLAUDE_EXE__'
+$StateDir  = Join-Path $env:LOCALAPPDATA 'claude-cmd'
+$SessDir   = Join-Path $StateDir 'sessions'
+$sessFile  = Join-Path $SessDir "$Sid.session"
+$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+
+function Read-Session($file) {
+  $h = @{}
+  foreach ($line in (Get-Content -LiteralPath $file -ErrorAction SilentlyContinue)) {
+    if ($line -match '^(?<k>[^=]+)=(?<v>.*)$') { $h[$Matches.k] = $Matches.v }
+  }
+  return $h
+}
+
+function Write-Session($file, $h) {
+  $tmp = "$file.tmp"
+  $lines = @(
+    "PID=$($h.PID)",
+    "FOLDER=$($h.FOLDER)",
+    "START=$($h.START)",
+    "STARTED_AT=$($h.STARTED_AT)",
+    "MODE=$($h.MODE)",
+    "STATUS=$($h.STATUS)",
+    "CLOSED_AT=$($h.CLOSED_AT)"
+  )
+  [System.IO.File]::WriteAllLines($tmp, [string[]]$lines, $Utf8NoBom)
+  Move-Item -LiteralPath $tmp -Destination $file -Force
+}
+
+$h = Read-Session $sessFile
+$folder = [string]$h.FOLDER
+$mode = [string]$h.MODE
+if (-not (Test-Path -LiteralPath $folder)) { $folder = $env:USERPROFILE }
+Set-Location -LiteralPath $folder
+Clear-Host
+Write-Host "  Claude Code - sesion activa"
+Write-Host "  (para salir escribe /exit o pulsa Ctrl+C)"
+Write-Host ''
+
+if ($mode -eq 'avanzada') {
+  $p = Start-Process -FilePath $ClaudeExe -ArgumentList '--dangerously-skip-permissions' -PassThru -NoNewWindow -WorkingDirectory $folder
+} else {
+  $p = Start-Process -FilePath $ClaudeExe -PassThru -NoNewWindow -WorkingDirectory $folder
+}
+
+$h.PID = $p.Id
+$h.STARTED_AT = $p.StartTime.ToString('o')
+$h.STATUS = 'running'
+Write-Session $sessFile $h
+
+$p.WaitForExit()
+
+$h2 = Read-Session $sessFile
+$h2.STATUS = 'closed'
+Write-Session $sessFile $h2
 '@
 
-    # Reemplazar marcadores por los valores reales.
-    # $skipArg viene como ' --dangerously-skip-permissions' (con espacio) o ''.
-    $launcherText = $launcherTemplate.Replace('__CLAUDE_EXE__', $ClaudeExe).Replace('__SKIP_ARG__', $skipArg)
+    # La ruta del binario puede tener apostrofes (p.ej. C:\Users\O'Brien); se duplican
+    # para que sobreviva al string entrecomillado con comilla simple del .ps1.
+    $claudeEsc   = $ClaudeExe.Replace("'", "''")
+    $HubPath     = Join-Path $cfgDir 'claude-hub.ps1'
+    $SessionPath = Join-Path $cfgDir 'claude-session.ps1'
+    New-Item -ItemType Directory -Force -Path (Join-Path $cfgDir 'sessions') | Out-Null
 
-    # UTF-8 SIN BOM (combina con 'chcp 65001' del .cmd para mostrar bien el menu).
+    # UTF-8 SIN BOM (un BOM contaminaria la primera clave del registro .session).
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    [IO.File]::WriteAllText($LauncherPath, $launcherText, $utf8NoBom)
-    if (Test-Path $LauncherPath) {
-        Write-Ok "Lanzador con menu de carpeta creado."
+    [IO.File]::WriteAllText($LauncherPath, $launcherCmd, $utf8NoBom)
+    [IO.File]::WriteAllText($HubPath, $hubTemplate.Replace('__CLAUDE_EXE__', $claudeEsc), $utf8NoBom)
+    [IO.File]::WriteAllText($SessionPath, $sessionTemplate.Replace('__CLAUDE_EXE__', $claudeEsc), $utf8NoBom)
+    if ((Test-Path $LauncherPath) -and (Test-Path $HubPath) -and (Test-Path $SessionPath)) {
+        Write-Ok "Centro de Mando creado (hub + runner de sesiones)."
     }
 
     # --- 2. Re-apuntar el .lnk del Escritorio al launcher .cmd ---
@@ -323,7 +655,7 @@ endlocal
     $sc.WorkingDirectory = $env:USERPROFILE
     $sc.IconLocation     = $iconRef
     $sc.WindowStyle      = 1
-    $sc.Description      = 'Abrir Claude Code (elegir carpeta)'
+    $sc.Description      = 'Centro de Mando de Claude Code (lanza y gestiona sesiones)'
     $sc.Save()
     [System.Runtime.InteropServices.Marshal]::ReleaseComObject($wsh) | Out-Null
 

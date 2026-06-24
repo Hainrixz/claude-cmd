@@ -4,7 +4,8 @@
 
 # Claude Code en 1 clic 🚀
 
-Instala **Claude Code** correctamente y deja un ícono **"Claude Terminal"** en tu Escritorio.
+Instala **Claude Code** correctamente y deja un ícono **"Claude Terminal"** en tu Escritorio:
+tu **Centro de Mando** para lanzar y gestionar varias sesiones de Claude Code a la vez.
 Sin saber programar. Hecho para evitar los errores típicos de instalación (el clásico
 `claude: command not found`, problemas de PATH, permisos, etc.).
 
@@ -129,24 +130,45 @@ chmod +x install-linux.sh && ./install-linux.sh
 
 ---
 
-## 📂 Elige la carpeta al abrir
+## 🎛️ Tu Centro de Mando
 
-Cada vez que abres **"Claude Terminal"**, te pregunta en qué carpeta quieres trabajar:
+**"Claude Terminal"** ya no es una sola sesión: es un **panel que se queda abierto** desde el
+que lanzas y controlas todas tus sesiones de Claude Code.
 
 ```
-  ¿En qué carpeta quieres abrir Claude Code? 📂
-
-   [Enter]  Tu carpeta personal  (por defecto)
-       1    Escritorio
-       2    Documentos
-       3    Descargas
-       4    Elegir una carpeta…  (se abre una ventana para buscarla)
-       5    Escribir o arrastrar una carpeta
+  +==================================================================+
+  |               CLAUDE TERMINAL  ·  CENTRO DE MANDO                |
+  |                   panel de control de sesiones                   |
+  +------------------------------------------------------------------+
+  |  ESTADO DEL PANEL     Activas: 1   Cerradas: 1   Total: 2        |
+  +------------------------------------------------------------------+
+  |  SESIONES                                                        |
+  | ---------------------------------------------------------------- |
+  | No. ESTADO      MODO     CARPETA                     PID         |
+  | ---------------------------------------------------------------- |
+  | 1   [ACTIVA]    avanzada ~/proyectos/web             48213       |
+  | 2   [CERRADA]   normal   ~/Documentos/notas          -           |
+  +------------------------------------------------------------------+
+  |  ACCIONES                                                        |
+  | ---------------------------------------------------------------- |
+  |   [N] Nueva sesion      [A] Nueva avanzada    [R] Refrescar      |
+  |   [C] Cerrar una        [X] Cerrar todas      [L] Limpiar        |
+  |   [S] Salir                                                      |
+  +------------------------------------------------------------------+
+  |                  Creado por @soy Enrique Rocha                   |
+  +==================================================================+
 ```
 
-Pulsa **Enter** para tu carpeta personal (lo de siempre), elige una carpeta común, abre un
-**explorador** para buscarla, o escribe/arrastra una ruta. Recuerda la **última carpeta** que
-usaste para ofrecértela la próxima vez. Funciona igual en Mac, Windows y Linux.
+> En la terminal real va **con color**: verde = activa, gris = cerrada, amarillo =
+> iniciando, las teclas en cian y los contadores en vivo arriba.
+
+- **[N] Nueva sesión:** elige una carpeta (tu carpeta personal, Escritorio/Documentos/Descargas,
+  un selector gráfico, o escribe/arrastra una ruta) y Claude Code se abre en una **ventana nueva**.
+  El panel **vuelve solo**, así que puedes lanzar **varias carpetas a la vez**.
+- **[A] Nueva avanzada:** igual, pero saltando permisos (`--dangerously-skip-permissions`).
+- **Lista en vivo:** ves todas tus sesiones, en qué carpeta están y si siguen **activas**.
+- **[C] / [X] Cerrar:** cierra una sesión concreta (o todas) sin tener que buscar su ventana.
+- Recuerda la **última carpeta** que usaste. Funciona igual en Mac, Windows y Linux.
 
 ---
 
@@ -160,12 +182,9 @@ cuenta de Anthropic y vuelve a la ventana de la terminal. ¡Listo!
 ## ⚙️ Opciones (avanzado)
 
 - **Modo avanzado (saltar permisos, `--dangerously-skip-permissions`):** desactivado por defecto.
-  Con él, Claude ejecuta acciones **sin pedirte confirmación** — actívalo solo si sabes lo que haces.
-  - Al instalar por **doble clic**, el instalador te pregunta si quieres activarlo.
-  - Al instalar por **comando**, actívalo así:
-    - Mac: `CLAUDE_CMD_SKIP_PERMS=1 bash <(curl -fsSL https://raw.githubusercontent.com/Hainrixz/claude-cmd/main/install-mac.command)`
-    - Linux: `CLAUDE_CMD_SKIP_PERMS=1 bash <(curl -fsSL https://raw.githubusercontent.com/Hainrixz/claude-cmd/main/install-linux.sh)`
-    - Windows: `$env:CLAUDE_CMD_SKIP_PERMS=1; irm https://raw.githubusercontent.com/Hainrixz/claude-cmd/main/install-windows.ps1 | iex`
+  Con él, Claude ejecuta acciones **sin pedirte confirmación** — úsalo solo si sabes lo que haces.
+  Ahora se elige **por sesión** desde el Centro de Mando: pulsa **[A] Nueva avanzada** en lugar de
+  **[N] Nueva sesión**. Cada sesión decide su propio modo, sin afectar a las demás.
 
 ---
 

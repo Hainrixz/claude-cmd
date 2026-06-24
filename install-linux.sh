@@ -17,7 +17,7 @@
 #   - En servidores / WSL sin entorno gráfico: instala igual y omite el ícono (sin fallar).
 #   - Es re-ejecutable (idempotente). Mensajes en español.
 #
-# Modo avanzado (saltar permisos): se activa con CLAUDE_CMD_SKIP_PERMS=1.
+# Modo avanzado (--dangerously-skip-permissions): se elige POR SESIÓN en el hub.
 #
 set -uo pipefail
 
@@ -203,13 +203,10 @@ fi
 ok "Claude Code instalado correctamente: $VER_OUT"
 
 # ---------------------------------------------------------------------------
-# 5) Modo avanzado (saltar permisos): opcional
+# 5) Modo avanzado (saltar permisos): ahora se elige POR SESIÓN en el hub.
 # ---------------------------------------------------------------------------
-SKIP_FLAG=""
-if [ "${CLAUDE_CMD_SKIP_PERMS:-0}" = "1" ]; then
-  SKIP_FLAG=" --dangerously-skip-permissions"
-  aviso "Modo avanzado activado para el lanzador (--dangerously-skip-permissions)."
-fi
+# El Centro de Mando ofrece [N] sesión normal y [A] sesión avanzada
+# (--dangerously-skip-permissions); ya no se hornea un flag global aquí.
 
 # ---------------------------------------------------------------------------
 # 6) Lanzador "Claude Terminal": script + ícono (.desktop) con menú de carpeta
@@ -225,33 +222,75 @@ titulo "Creando el lanzador 'Claude Terminal'"
 CLAUDE_ABS="$(command -v claude || echo "$CLAUDE_BIN")"
 mkdir -p "$BIN_DIR" 2>/dev/null || true
 
-# 6a) Script lanzador (~/.local/bin/claude-terminal) con el menú "elegir carpeta".
-# El cuerpo va en un heredoc ENTRE COMILLAS (<<'MENU') -> bash literal, sin
-# escapar cada $. Solo la línea de lanzamiento usa heredoc normal al final.
-cat > "$LAUNCHER_SCRIPT" <<'MENU'
+# 6a) Script lanzador (~/.local/bin/claude-terminal): el CENTRO DE MANDO.
+# Cabecera EOF (expandida) que hornea la ruta del binario + cuerpo del hub
+# en un heredoc LITERAL <<'MENU' (bash tal cual).
+cat > "$LAUNCHER_SCRIPT" <<EOF
 #!/bin/bash
-# Claude Terminal — Lanzador de Claude Code (generado por claude-cmd).
-# Pregunta en qué carpeta abrir Claude y la abre ahí.
+CLAUDE_BIN_BAKED="$CLAUDE_ABS"
+EOF
+cat >> "$LAUNCHER_SCRIPT" <<'MENU'
+# Claude Terminal — Centro de Mando (generado por claude-cmd).
+# Abre tu panel: lanza, observa y cierra sesiones de Claude Code.
 export PATH="$HOME/.local/bin:$PATH"
-clear 2>/dev/null || true
 
-# ---- Menú "elegir carpeta" ----
+# ---- Estado / registro de sesiones ----
 STATE_DIR="$HOME/.local/state/claude-cmd"
+SESS_DIR="$STATE_DIR/sessions"
+RUN_DIR="$STATE_DIR/runners"
 STATE_FILE="$STATE_DIR/lastdir"
+GRACE_CLOSE=10   # seg. que una sesión cerrada sigue visible antes de auto-borrarse
+mkdir -p "$SESS_DIR" "$RUN_DIR" 2>/dev/null || true
+chmod 700 "$STATE_DIR" "$SESS_DIR" "$RUN_DIR" 2>/dev/null || true
 
-# Carpetas comunes respetando los nombres localizados del sistema
-# (p. ej. ~/Escritorio, ~/Descargas en español) vía xdg-user-dir.
-dir_xdg() { # $1=DESKTOP|DOCUMENTS|DOWNLOAD   $2=ruta de respaldo
+# ---- Colores (degradan a vacío si no hay terminal con color) ----
+if [ -t 1 ] && command -v tput >/dev/null 2>&1 && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
+  C_RESET="$(tput sgr0)"; C_BOLD="$(tput bold)"; C_DIM="$(tput dim)"
+  C_GREEN="$(tput setaf 2)"; C_RED="$(tput setaf 1)"; C_YEL="$(tput setaf 3)"
+  C_CYAN="$(tput setaf 6)"; C_MAG="$(tput setaf 5)"
+else
+  C_RESET=""; C_BOLD=""; C_DIM=""; C_GREEN=""; C_RED=""; C_YEL=""; C_CYAN=""; C_MAG=""
+fi
+
+# ---- Geometría del panel (caja de 70 cols + sangría de 2) ----
+IND="  "
+_repeat() { local n="$1" c="$2" o=''; while [ "$n" -gt 0 ]; do o="$o$c"; n=$((n-1)); done; printf '%s' "$o"; }
+EQ68="$(_repeat 68 '=')"; DSH68="$(_repeat 68 '-')"; DSH66="$(_repeat 66 '-')"
+
+_top()  { printf '%s+%s+\n' "$IND" "$EQ68"; }
+_bot()  { printf '%s+%s+\n' "$IND" "$EQ68"; }
+_div()  { printf '%s+%s+\n' "$IND" "$DSH68"; }
+_isep() { printf '%s| %s |\n' "$IND" "$DSH66"; }
+
+_left() {
+  local v="$1" c="${2:-$1}" len pad
+  len=${#v}
+  if [ "$len" -gt 66 ]; then v="${v:0:65}…"; c="$v"; len=66; fi
+  pad=$((66 - len)); [ "$pad" -lt 0 ] && pad=0
+  printf '%s| %s%*s |\n' "$IND" "$c" "$pad" ''
+}
+_center() {
+  local v="$1" c="${2:-$1}" len l r
+  len=${#v}
+  if [ "$len" -gt 66 ]; then v="${v:0:65}…"; c="$v"; len=66; fi
+  l=$(( (66 - len) / 2 )); r=$(( 66 - len - l ))
+  printf '%s| %*s%s%*s |\n' "$IND" "$l" '' "$c" "$r" ''
+}
+_cell() {
+  local w="$1" t="$2" col="$3" len pad
+  len=${#t}
+  if [ "$len" -gt "$w" ]; then t="${t:0:$((w-1))}…"; len="$w"; fi
+  pad=$((w - len)); [ "$pad" -lt 0 ] && pad=0
+  printf '%s%s%s%*s' "$col" "$t" "$C_RESET" "$pad" ''
+}
+_hk() { printf '[%s%s%s]' "$C_CYAN$C_BOLD" "$1" "$C_RESET"; }
+
+# ---- Utilidades de registro ----
+dir_xdg() { # $1=DESKTOP|DOCUMENTS|DOWNLOAD   $2=respaldo
   local d=""
   if command -v xdg-user-dir >/dev/null 2>&1; then d="$(xdg-user-dir "$1" 2>/dev/null)"; fi
   if [ -n "$d" ] && [ "$d" != "$HOME" ]; then printf '%s' "$d"; else printf '%s' "$2"; fi
 }
-DIR_ESCRITORIO="$(dir_xdg DESKTOP   "$HOME/Desktop")"
-DIR_DOCUMENTOS="$(dir_xdg DOCUMENTS "$HOME/Documents")"
-DIR_DESCARGAS="$(dir_xdg DOWNLOAD  "$HOME/Downloads")"
-
-# Limpia una ruta pegada o arrastrada: quita comillas, des-escapa el "\ " que
-# algunos gestores de archivos meten al arrastrar, y recorta espacios sobrantes.
 _limpiar_ruta() {
   local s="$1"
   s="${s#\"}"; s="${s%\"}"
@@ -262,8 +301,6 @@ _limpiar_ruta() {
   s="${s%"${s##*[![:space:]]}"}"
   printf '%s' "$s"
 }
-
-# Selector gráfico de carpetas (zenity en GNOME/GTK, kdialog en KDE).
 elegir_grafico() {
   if command -v zenity >/dev/null 2>&1; then
     zenity --file-selection --directory --title="Elige la carpeta para abrir Claude Code" 2>/dev/null
@@ -273,103 +310,379 @@ elegir_grafico() {
     return 2
   fi
 }
+_escribir() {
+  local f="$1" tmp="$1.tmp.$$"
+  cat > "$tmp" 2>/dev/null && mv -f "$tmp" "$f" 2>/dev/null
+}
+# Marca (o limpia) la hora de cierre en el archivo de sesión, de forma atómica.
+_stamp_closed() {
+  local f="$1" t="$2" tmp="$1.tmp.$$"
+  { grep -v '^CLOSED_AT=' "$f" 2>/dev/null; printf 'CLOSED_AT=%s\n' "$t"; } > "$tmp" 2>/dev/null && mv -f "$tmp" "$f" 2>/dev/null
+}
+_get() {
+  local f="$1" k="$2" line
+  [ -f "$f" ] || return 1
+  line="$(grep -m1 "^$k=" "$f" 2>/dev/null)" || return 1
+  printf '%s' "${line#*=}"
+}
+_vivo() {
+  case "$1" in ''|*[!0-9]*) return 1;; esac
+  kill -0 "$1" 2>/dev/null
+}
 
-# Memoria: última carpeta usada (si existe y sigue siendo una carpeta válida).
-ULTIMA=""
-if [ -f "$STATE_FILE" ]; then ULTIMA="$(cat "$STATE_FILE" 2>/dev/null)"; fi
-if [ -n "$ULTIMA" ] && [ ! -d "$ULTIMA" ]; then ULTIMA=""; fi
+# ---- Escaneo de sesiones ----
+_scan() {
+  SESS_IDX=(); ROW_N=(); ROW_BADGE=(); ROW_BCOL=(); ROW_MODO=(); ROW_MCOL=(); ROW_FOLDER=(); ROW_PID=()
+  SES_TOT=0; SES_ACT=0; SES_CLS=0
+  local f n=0 pid folder estado modo now st age badge badgecol modocol fdisp closed_at sid finished
+  now="$(date +%s)"
+  for f in "$SESS_DIR"/*.session; do
+    [ -e "$f" ] || continue
+    pid="$(_get "$f" PID)"; folder="$(_get "$f" FOLDER)"; estado="$(_get "$f" STATUS)"; modo="$(_get "$f" MODE)"
+    st="$(_get "$f" START)"; age=$(( now - ${st:-$now} ))
+    finished=0
+    if _vivo "$pid"; then
+      badge="[ACTIVA]"; badgecol="$C_GREEN$C_BOLD"
+    elif [ "$estado" = "launching" ] && [ "$age" -le 3 ]; then
+      badge="[INICIANDO]"; badgecol="$C_YEL"
+    else
+      finished=1
+      if [ "$estado" = "launching" ]; then badge="[FALLO]"; badgecol="$C_YEL$C_BOLD"; else badge="[CERRADA]"; badgecol="$C_DIM"; fi
+    fi
+    # Auto-borrado: una sesión terminada se sella con CLOSED_AT y, pasada la gracia, se elimina sola.
+    if [ "$finished" = "1" ]; then
+      closed_at="$(_get "$f" CLOSED_AT)"
+      case "$closed_at" in ''|*[!0-9]*) closed_at="$now"; _stamp_closed "$f" "$now" ;; esac
+      if [ $(( now - closed_at )) -gt "$GRACE_CLOSE" ]; then
+        sid="$(basename "$f" .session)"; rm -f "$f" "$RUN_DIR/$sid.sh" 2>/dev/null; continue
+      fi
+      SES_CLS=$((SES_CLS+1))
+    elif [ "$badge" = "[ACTIVA]" ]; then
+      SES_ACT=$((SES_ACT+1))
+    fi
+    n=$((n+1)); SESS_IDX[$n]="$f"
+    if [ "$modo" = "avanzada" ]; then modocol="$C_MAG"; else modo="normal"; modocol="$C_DIM"; fi
+    fdisp="${folder/#$HOME/~}"
+    ROW_N[$n]="$n"; ROW_BADGE[$n]="$badge"; ROW_BCOL[$n]="$badgecol"
+    ROW_MODO[$n]="$modo"; ROW_MCOL[$n]="$modocol"; ROW_FOLDER[$n]="$fdisp"; ROW_PID[$n]="${pid:--}"
+  done
+  SES_TOT=$n
+}
 
-DESTINO=""
-while :; do
-  echo "¿En qué carpeta quieres abrir Claude Code? 📂"
-  echo "Elige una opción (o pulsa Enter para usar la de siempre)."
-  echo
-  echo "  [Enter]  Tu carpeta personal  (por defecto)"
-  echo "       1   Escritorio"
-  echo "       2   Documentos"
-  echo "       3   Descargas"
-  echo "       4   Elegir una carpeta…  (se abre una ventana para buscarla)"
-  echo "       5   Escribir o pegar una carpeta aquí"
-  if [ -n "$ULTIMA" ]; then
-    echo "       6   Última carpeta que usaste:  $ULTIMA"
+_panel() {
+  _scan
+  clear 2>/dev/null || true
+  _top
+  _center "CLAUDE TERMINAL · CENTRO DE MANDO" "${C_BOLD}${C_CYAN}CLAUDE TERMINAL${C_RESET} ${C_DIM}·${C_RESET} ${C_BOLD}CENTRO DE MANDO${C_RESET}"
+  _center "panel de control de sesiones" "${C_DIM}panel de control de sesiones${C_RESET}"
+  _div
+  local sb_plain sb_col
+  sb_plain=" ESTADO DEL PANEL     Activas: ${SES_ACT}    Cerradas: ${SES_CLS}    Total: ${SES_TOT}"
+  sb_col=" ${C_BOLD}ESTADO DEL PANEL${C_RESET}     ${C_GREEN}Activas: ${SES_ACT}${C_RESET}    ${C_RED}Cerradas: ${SES_CLS}${C_RESET}    Total: ${SES_TOT}"
+  _left "$sb_plain" "$sb_col"
+  _div
+  _left " SESIONES" " ${C_BOLD}SESIONES${C_RESET}"
+  _isep
+  local hN hE hM hF hP
+  hN="$(_cell 3 'No.' "$C_DIM")"; hE="$(_cell 11 'ESTADO' "$C_DIM")"; hM="$(_cell 8 'MODO' "$C_DIM")"
+  hF="$(_cell 33 'CARPETA' "$C_DIM")"; hP="$(_cell 7 'PID' "$C_DIM")"
+  printf '%s| %s %s %s %s %s |\n' "$IND" "$hN" "$hE" "$hM" "$hF" "$hP"
+  _isep
+  _print_rows
+  _div
+  _left " ACCIONES" " ${C_BOLD}ACCIONES${C_RESET}"
+  _isep
+  _left "  [N] Nueva sesion      [A] Nueva avanzada    [R] Refrescar" \
+        "  $(_hk N) Nueva sesion      $(_hk A) Nueva avanzada    $(_hk R) Refrescar"
+  _left "  [C] Cerrar una        [X] Cerrar todas     [L] Limpiar cerradas" \
+        "  $(_hk C) Cerrar una        $(_hk X) Cerrar todas     $(_hk L) Limpiar cerradas"
+  _left "  [S] Salir" "  $(_hk S) Salir"
+  _div
+  _center "Creado por @soy Enrique Rocha" "${C_DIM}${C_MAG}Creado por @soy Enrique Rocha${C_RESET}"
+  _bot
+}
+
+_print_rows() {
+  if [ "$SES_TOT" -eq 0 ]; then
+    _left "  sin sesiones todavia — pulsa [N] para abrir la primera" \
+          "  ${C_DIM}sin sesiones todavia — pulsa [N] para abrir la primera${C_RESET}"
+    return
   fi
-  echo
-  printf "Tu elección: "
-  read -r ELECCION
+  local i nC eC mC fC pC
+  i=1
+  while [ "$i" -le "$SES_TOT" ]; do
+    nC="$(_cell 3 "${ROW_N[$i]}" "$C_DIM")"
+    eC="$(_cell 11 "${ROW_BADGE[$i]}" "${ROW_BCOL[$i]}")"
+    mC="$(_cell 8 "${ROW_MODO[$i]}" "${ROW_MCOL[$i]}")"
+    fC="$(_cell 33 "${ROW_FOLDER[$i]}" "")"
+    pC="$(_cell 7 "${ROW_PID[$i]}" "$C_DIM")"
+    printf '%s| %s %s %s %s %s |\n' "$IND" "$nC" "$eC" "$mC" "$fC" "$pC"
+    i=$((i+1))
+  done
+}
 
-  case "$ELECCION" in
-    "")  DESTINO="$HOME" ;;
-    1)   DESTINO="$DIR_ESCRITORIO" ;;
-    2)   DESTINO="$DIR_DOCUMENTOS" ;;
-    3)   DESTINO="$DIR_DESCARGAS" ;;
-    4)
-      elegida="$(elegir_grafico)"; rc=$?
-      if [ "$rc" -eq 2 ]; then
-        echo; echo "  No hay selector gráfico (instala 'zenity' o 'kdialog')."
-        echo "  Usa la opción 5 para escribir la ruta."; echo; continue
-      fi
-      elegida="$(_limpiar_ruta "$elegida")"
-      if [ -n "$elegida" ] && [ -d "$elegida" ]; then
-        DESTINO="$elegida"
-      else
-        echo; echo "  No se eligió ninguna carpeta. Volvamos al menú."; echo; continue
-      fi
-      ;;
-    5)
-      printf "  Escribe o pega la carpeta y pulsa Enter: "
-      read -r escrita
-      escrita="$(_limpiar_ruta "$escrita")"
-      case "$escrita" in
-        "~")   escrita="$HOME" ;;
-        "~/"*) escrita="$HOME/${escrita#\~/}" ;;
-      esac
-      if [ -n "$escrita" ] && [ -d "$escrita" ]; then
-        DESTINO="$escrita"
-      else
-        echo; echo "  No encontré esa carpeta. Volvamos al menú."; echo; continue
-      fi
-      ;;
-    6)
-      if [ -n "$ULTIMA" ] && [ -d "$ULTIMA" ]; then
-        DESTINO="$ULTIMA"
-      else
-        echo; echo "  Opción no válida. Volvamos al menú."; echo; continue
-      fi
-      ;;
-    *)   echo; echo "  Opción no válida. Volvamos al menú."; echo; continue ;;
-  esac
-  break
-done
+_mini() {
+  clear 2>/dev/null || true
+  _top
+  _center "CLAUDE TERMINAL · CENTRO DE MANDO" "${C_BOLD}${C_CYAN}CLAUDE TERMINAL${C_RESET} ${C_DIM}·${C_RESET} ${C_BOLD}CENTRO DE MANDO${C_RESET}"
+  _center "$1" "${C_DIM}$1${C_RESET}"
+  _bot
+}
 
-# Validación final: si el destino no sirve, caer a la carpeta personal.
-if [ -z "$DESTINO" ] || [ ! -d "$DESTINO" ]; then
-  echo "  No encontré esa carpeta. Abro tu carpeta personal."
-  DESTINO="$HOME"
-fi
-if ! cd "$DESTINO" 2>/dev/null; then
-  echo "  No encontré esa carpeta. Abro tu carpeta personal."
-  cd "$HOME" 2>/dev/null || cd /
-fi
+# ---- Selector de carpeta (fija DESTINO; 1 = volver) ----
+elegir_carpeta() {
+  DESTINO=""
+  local ULTIMA="" ELECCION elegida escrita rc
+  local DIR_ESCRITORIO DIR_DOCUMENTOS DIR_DESCARGAS
+  DIR_ESCRITORIO="$(dir_xdg DESKTOP   "$HOME/Desktop")"
+  DIR_DOCUMENTOS="$(dir_xdg DOCUMENTS "$HOME/Documents")"
+  DIR_DESCARGAS="$(dir_xdg DOWNLOAD  "$HOME/Downloads")"
+  [ -f "$STATE_FILE" ] && ULTIMA="$(cat "$STATE_FILE" 2>/dev/null)"
+  if [ -n "$ULTIMA" ] && [ ! -d "$ULTIMA" ]; then ULTIMA=""; fi
+  while :; do
+    _mini "elegir carpeta para la nueva sesion"
+    echo
+    printf "    %s[Enter]%s  Tu carpeta personal\n" "$C_BOLD" "$C_RESET"
+    printf "       %s1%s     Escritorio\n" "$C_CYAN" "$C_RESET"
+    printf "       %s2%s     Documentos\n" "$C_CYAN" "$C_RESET"
+    printf "       %s3%s     Descargas\n" "$C_CYAN" "$C_RESET"
+    printf "       %s4%s     Elegir una carpeta…  (selector gráfico)\n" "$C_CYAN" "$C_RESET"
+    printf "       %s5%s     Escribir o pegar una carpeta\n" "$C_CYAN" "$C_RESET"
+    [ -n "$ULTIMA" ] && printf "       %s6%s     Última usada:  %s\n" "$C_CYAN" "$C_RESET" "$ULTIMA"
+    printf "       %sv%s     Volver al panel\n" "$C_CYAN" "$C_RESET"
+    echo
+    printf "  %sTu elección%s %s>%s " "$C_BOLD" "$C_RESET" "$C_GREEN$C_BOLD" "$C_RESET"
+    read -r ELECCION || return 1
+    case "$ELECCION" in
+      "")  DESTINO="$HOME" ;;
+      1)   DESTINO="$DIR_ESCRITORIO" ;;
+      2)   DESTINO="$DIR_DOCUMENTOS" ;;
+      3)   DESTINO="$DIR_DESCARGAS" ;;
+      4)
+        elegida="$(elegir_grafico)"; rc=$?
+        if [ "$rc" -eq 2 ]; then
+          echo; echo "  No hay selector gráfico (instala 'zenity' o 'kdialog'). Usa la opción 5."; sleep 2; continue
+        fi
+        elegida="$(_limpiar_ruta "$elegida")"
+        if [ -n "$elegida" ] && [ -d "$elegida" ]; then DESTINO="$elegida"; else continue; fi
+        ;;
+      5)
+        printf "  Escribe o pega la carpeta y pulsa Enter: "
+        read -r escrita
+        escrita="$(_limpiar_ruta "$escrita")"
+        case "$escrita" in "~") escrita="$HOME";; "~/"*) escrita="$HOME/${escrita#\~/}";; esac
+        if [ -n "$escrita" ] && [ -d "$escrita" ]; then DESTINO="$escrita"; else echo "  No encontré esa carpeta."; sleep 1; continue; fi
+        ;;
+      6)
+        if [ -n "$ULTIMA" ] && [ -d "$ULTIMA" ]; then DESTINO="$ULTIMA"; else continue; fi
+        ;;
+      v|V) return 1 ;;
+      *)   continue ;;
+    esac
+    break
+  done
+  if [ -z "$DESTINO" ] || [ ! -d "$DESTINO" ]; then DESTINO="$HOME"; fi
+  mkdir -p "$STATE_DIR" 2>/dev/null && printf '%s\n' "$DESTINO" > "$STATE_FILE" 2>/dev/null
+  return 0
+}
 
-# Guardar la carpeta realmente usada como "última carpeta".
-mkdir -p "$STATE_DIR" 2>/dev/null && printf '%s\n' "$(pwd)" > "$STATE_FILE" 2>/dev/null
+# ---- Abrir el runner en una ventana nueva del emulador disponible ----
+abrir_ventana() {
+  local runner="$1"
+  [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ] || return 1
+  if   command -v gnome-terminal >/dev/null 2>&1; then nohup gnome-terminal -- bash "$runner" >/dev/null 2>&1 &
+  elif command -v konsole        >/dev/null 2>&1; then nohup konsole -e bash "$runner" >/dev/null 2>&1 &
+  elif command -v xfce4-terminal >/dev/null 2>&1; then nohup xfce4-terminal -x bash "$runner" >/dev/null 2>&1 &
+  elif command -v kitty          >/dev/null 2>&1; then nohup kitty bash "$runner" >/dev/null 2>&1 &
+  elif command -v alacritty      >/dev/null 2>&1; then nohup alacritty -e bash "$runner" >/dev/null 2>&1 &
+  elif command -v tilix          >/dev/null 2>&1; then nohup tilix -e bash "$runner" >/dev/null 2>&1 &
+  elif command -v mate-terminal  >/dev/null 2>&1; then nohup mate-terminal -- bash "$runner" >/dev/null 2>&1 &
+  elif command -v x-terminal-emulator >/dev/null 2>&1; then nohup x-terminal-emulator -e bash "$runner" >/dev/null 2>&1 &
+  elif command -v xterm          >/dev/null 2>&1; then nohup xterm -e bash "$runner" >/dev/null 2>&1 &
+  else return 1
+  fi
+  return 0
+}
 
+# ---- Lanzar una sesión en una ventana nueva. $1 = normal|avanzada. Usa DESTINO. ----
+spawn_sesion() {
+  local modo="$1" destino="$DESTINO" sid sessf runner flag=""
+  sid="$(date +%s)-$$-$RANDOM"
+  sessf="$SESS_DIR/$sid.session"
+  runner="$RUN_DIR/$sid.sh"
+  [ "$modo" = "avanzada" ] && flag=" --dangerously-skip-permissions"
+
+  _escribir "$sessf" <<SEED
+PID=
+FOLDER=$destino
+START=$(date +%s)
+STARTED_AT=
+MODE=$modo
+STATUS=launching
+SEED
+
+  cat > "$runner" <<RUNNER
+#!/bin/bash
+export PATH="\$HOME/.local/bin:\$PATH"
+SESSF="$sessf"
+FOLDER="\$(grep -m1 '^FOLDER=' "\$SESSF" 2>/dev/null)"; FOLDER="\${FOLDER#FOLDER=}"
+cd "\$FOLDER" 2>/dev/null || cd "\$HOME"
 clear 2>/dev/null || true
-echo "  ✔ Abriendo Claude Code en:  $(pwd)"
+( while kill -0 \$\$ 2>/dev/null; do sleep 2; done
+  T="\$SESSF.tmp.\$\$"
+  sed 's/^STATUS=.*/STATUS=closed/' "\$SESSF" > "\$T" 2>/dev/null && mv -f "\$T" "\$SESSF" 2>/dev/null
+) >/dev/null 2>&1 &
+ARR="\$(date +%s)"
+LSTART="\$(ps -o lstart= -p \$\$ 2>/dev/null | tr -s ' ')"
+T="\$SESSF.tmp.\$\$"
+{
+  printf 'PID=%s\n' "\$\$"
+  printf 'FOLDER=%s\n' "\$FOLDER"
+  printf 'START=%s\n' "\$ARR"
+  printf 'STARTED_AT=%s\n' "\$LSTART"
+  printf 'MODE=%s\n' "$modo"
+  printf 'STATUS=running\n'
+} > "\$T" 2>/dev/null && mv -f "\$T" "\$SESSF" 2>/dev/null
+echo "  Claude Code — sesión activa"
 echo "  (para salir escribe /exit o pulsa Ctrl+C)"
 echo
-echo "💡 ¿Primera vez? Pulsa Enter sin escribir nada y listo: usamos tu carpeta personal."
-echo
-# ---- /Menú ----
+exec "$CLAUDE_BIN_BAKED"$flag
+RUNNER
+  chmod +x "$runner" 2>/dev/null || true
+
+  if abrir_ventana "$runner"; then
+    printf "\n  %s✔%s Abriendo Claude en una ventana nueva — %s\n" "$C_GREEN" "$C_RESET" "$destino"; sleep 1
+    return 0
+  fi
+  echo; echo "  No pude abrir una ventana separada (sin entorno gráfico o sin"
+  echo "  un emulador conocido). Abro Claude aquí mismo."; sleep 1
+  rm -f "$sessf" "$runner" 2>/dev/null
+  cd "$destino" 2>/dev/null || cd "$HOME" 2>/dev/null || cd /
+  "$CLAUDE_BIN_BAKED"$flag
+  return 0
+}
+
+cerrar_sesion() {
+  if [ "${SES_TOT:-0}" -eq 0 ]; then echo "  No hay sesiones."; sleep 1; return; fi
+  local num f pid saved cur i=0
+  printf "  %sNº a cerrar%s (Enter = cancelar) %s>%s " "$C_BOLD" "$C_RESET" "$C_GREEN$C_BOLD" "$C_RESET"
+  read -r num
+  [ -z "$num" ] && return
+  case "$num" in *[!0-9]*) echo "  Número inválido."; sleep 1; return;; esac
+  f="${SESS_IDX[$num]:-}"
+  if [ -z "$f" ] || [ ! -f "$f" ]; then echo "  Número inválido."; sleep 1; return; fi
+  pid="$(_get "$f" PID)"
+  case "$pid" in ''|*[!0-9]*) echo "  Esa sesión aún se está iniciando (sin PID)."; sleep 1; return;; esac
+  saved="$(_get "$f" STARTED_AT)"
+  cur="$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s ' ')"
+  if [ -n "$saved" ] && [ -n "$cur" ] && [ "$saved" != "$cur" ]; then
+    echo "  Ese proceso cambió (PID reciclado). No cierro nada."; sleep 1; return
+  fi
+  kill "$pid" 2>/dev/null
+  while [ $i -lt 5 ] && kill -0 "$pid" 2>/dev/null; do sleep 1; i=$((i+1)); done
+  kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+  printf "  %s✔%s Sesión cerrada.\n" "$C_GREEN" "$C_RESET"; sleep 1
+}
+
+cerrar_todas() {
+  if [ "${SES_TOT:-0}" -eq 0 ]; then echo "  No hay sesiones."; sleep 1; return; fi
+  local r f pid
+  printf "  ¿Cerrar %sTODAS%s las sesiones activas? [s/N] " "$C_BOLD" "$C_RESET"
+  read -r r
+  case "$r" in [sS]*) ;; *) return;; esac
+  for f in "$SESS_DIR"/*.session; do
+    [ -e "$f" ] || continue
+    pid="$(_get "$f" PID)"
+    case "$pid" in ''|*[!0-9]*) continue;; esac
+    kill "$pid" 2>/dev/null
+  done
+  echo "  Listo."; sleep 1
+}
+
+limpiar_cerradas() {
+  local f pid estado sid now start age
+  now="$(date +%s)"
+  for f in "$SESS_DIR"/*.session; do
+    [ -e "$f" ] || continue
+    pid="$(_get "$f" PID)"; estado="$(_get "$f" STATUS)"
+    start="$(_get "$f" START)"; age=$(( now - ${start:-$now} ))
+    if ! _vivo "$pid" && ! { [ "$estado" = "launching" ] && [ "$age" -le 3 ]; }; then
+      sid="$(basename "$f" .session)"
+      rm -f "$f" "$RUN_DIR/$sid.sh" 2>/dev/null
+    fi
+  done
+  printf "  %s✔%s Registro limpio.\n" "$C_GREEN" "$C_RESET"; sleep 1
+}
+
+# Poda agresiva al arrancar/salir: borra todo lo terminado (protege lo que recién arranca).
+cleanup() {
+  local f pid estado start now age sid
+  now="$(date +%s)"
+  for f in "$SESS_DIR"/*.session; do
+    [ -e "$f" ] || continue
+    pid="$(_get "$f" PID)"; estado="$(_get "$f" STATUS)"
+    start="$(_get "$f" START)"; age=$(( now - ${start:-$now} ))
+    if ! _vivo "$pid" && ! { [ "$estado" = "launching" ] && [ "$age" -le 3 ]; }; then
+      sid="$(basename "$f" .session)"
+      rm -f "$f" "$RUN_DIR/$sid.sh" 2>/dev/null
+    fi
+  done
+}
+
+salir() {
+  local vivas=0 f pid r
+  for f in "$SESS_DIR"/*.session; do
+    [ -e "$f" ] || continue
+    pid="$(_get "$f" PID)"
+    _vivo "$pid" && vivas=$((vivas+1))
+  done
+  if [ "$vivas" -gt 0 ]; then
+    echo
+    printf "  Hay %s sesión(es) activa(s). ¿Cerrarlas al salir? [s/N] " "$vivas"
+    read -r r
+    case "$r" in
+      [sS]*)
+        for f in "$SESS_DIR"/*.session; do
+          [ -e "$f" ] || continue
+          pid="$(_get "$f" PID)"
+          case "$pid" in ''|*[!0-9]*) continue;; esac
+          kill "$pid" 2>/dev/null
+        done ;;
+      *) echo "  Las dejo abiertas (aparecerán al volver a abrir el Centro de Mando)."; sleep 1 ;;
+    esac
+  fi
+  clear 2>/dev/null || true
+  exit 0
+}
+
+hub_loop() {
+  trap cleanup EXIT
+  cleanup
+  local OP
+  while :; do
+    _panel
+    echo
+    printf "  %sAcción%s %s>%s " "$C_BOLD" "$C_RESET" "$C_GREEN$C_BOLD" "$C_RESET"
+    read -r OP || salir
+    case "$OP" in
+      n|N) if elegir_carpeta; then spawn_sesion "normal";   fi ;;
+      a|A) if elegir_carpeta; then spawn_sesion "avanzada"; fi ;;
+      r|R) : ;;
+      c|C) cerrar_sesion ;;
+      x|X) cerrar_todas ;;
+      l|L) limpiar_cerradas ;;
+      s|S) salir ;;
+      *)   : ;;
+    esac
+  done
+}
+
+if [ "${BASH_SOURCE[0]:-$0}" = "$0" ]; then
+  hub_loop
+fi
 MENU
-cat >> "$LAUNCHER_SCRIPT" <<EOF
-"$CLAUDE_ABS"$SKIP_FLAG "\$@"
-echo
-echo "Claude se cerró. Pulsa ENTER para cerrar esta ventana..."
-read -r _
-EOF
 chmod +x "$LAUNCHER_SCRIPT" 2>/dev/null || true
-ok "Lanzador creado: ~/.local/bin/claude-terminal"
+ok "Centro de Mando creado: ~/.local/bin/claude-terminal"
 
 # 6b) Ícono (.desktop) para el menú de aplicaciones (y el Escritorio si existe).
 # Solo tiene sentido si hay entorno gráfico; en servidores/WSL sin GUI se omite.
@@ -393,7 +706,7 @@ Type=Application
 Version=1.0
 Name=Claude Terminal
 GenericName=Claude Code
-Comment=Abrir Claude Code (elegir carpeta)
+Comment=Centro de Mando de Claude Code (lanza y gestiona sesiones)
 Exec=$LAUNCHER_SCRIPT
 Icon=$ICON_REF
 Terminal=true
@@ -427,7 +740,7 @@ ok "Claude Code está instalado y verificado."
 printf "\n"
 info "Cómo abrirlo:"
 info "  • Busca 'Claude Terminal' en tu menú de aplicaciones (si hay escritorio), o"
-info "  • Escribe en una terminal NUEVA:  claude-terminal   (te pregunta la carpeta), o"
+info "  • Escribe en una terminal NUEVA:  claude-terminal   (abre tu Centro de Mando), o"
 info "  • Escribe simplemente:  claude"
 printf "\n"
 aviso "La primera vez, Claude abrirá tu navegador para iniciar sesión."
