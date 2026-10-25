@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Enrique Rocha (@soyenriquerocha)
+# SPDX-License-Identifier: MIT
+# id: er-033d3bf1
 """
 make-icons.py — Genera los íconos de "Claude Terminal" a partir de la mascota.
 
@@ -124,7 +127,7 @@ def emit_b64(path):
     return len(b)
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(epilog='Hecho por Enrique Rocha (@soyenriquerocha) · tododeia.com')
     ap.add_argument("src"); ap.add_argument("out")
     ap.add_argument("--final", choices=["A", "B", "C"])
     a = ap.parse_args()

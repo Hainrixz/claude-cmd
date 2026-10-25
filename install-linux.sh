@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) 2026 Enrique Rocha (@soyenriquerocha)
+# SPDX-License-Identifier: MIT
+# id: er-033d3bf1
 #
 # install-linux.sh — Instalador "un comando" de Claude Code para Linux
 # Repo: https://github.com/Hainrixz/claude-cmd
